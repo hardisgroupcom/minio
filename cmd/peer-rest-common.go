@@ -18,7 +18,7 @@
 package cmd
 
 const (
-	peerRESTVersion       = "v15" // Add LoadTransitionTierConfig
+	peerRESTVersion       = "v16" // Add LoadPoolMeta
 	peerRESTVersionPrefix = SlashSeparator + peerRESTVersion
 	peerRESTPrefix        = minioReservedBucketPath + "/peer"
 	peerRESTPath          = peerRESTPrefix + peerRESTVersionPrefix
@@ -63,6 +63,7 @@ const (
 	peerRESTMethodGetPeerMetrics           = "/peermetrics"
 	peerRESTMethodLoadTransitionTierConfig = "/loadtransitiontierconfig"
 	peerRESTMethodSpeedtest                = "/speedtest"
+	peerRESTMethodReloadPoolMeta           = "/reloadpoolmeta"
 )
 
 const (

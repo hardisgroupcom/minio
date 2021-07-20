@@ -41,7 +41,9 @@ import (
 type erasureServerPools struct {
 	GatewayUnsupported
 
-	serverPools []*erasureSets
+	poolMetaMutex sync.RWMutex
+	poolMeta      poolMeta
+	serverPools   []*erasureSets
 
 	// Shut down async operations
 	shutdown context.CancelFunc
@@ -61,7 +63,9 @@ func newErasureServerPools(ctx context.Context, endpointServerPools EndpointServ
 
 		formats      = make([]*formatErasureV3, len(endpointServerPools))
 		storageDisks = make([][]StorageAPI, len(endpointServerPools))
-		z            = &erasureServerPools{serverPools: make([]*erasureSets, len(endpointServerPools))}
+		z            = &erasureServerPools{
+			serverPools: make([]*erasureSets, len(endpointServerPools)),
+		}
 	)
 
 	var localDrives []string
@@ -112,6 +116,20 @@ func newErasureServerPools(ctx context.Context, endpointServerPools EndpointServ
 			return nil, err
 		}
 	}
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for {
+		err := z.Init(ctx)
+		if err != nil {
+			if !configRetriableErrors(err) {
+				logger.Fatal(err, "Unable to initialize backend")
+			}
+			time.Sleep(time.Duration(r.Float64() * float64(5*time.Second)))
+			continue
+		}
+		break
+	}
+
 	ctx, z.shutdown = context.WithCancel(ctx)
 	go intDataUpdateTracker.start(ctx, localDrives...)
 	return z, nil
@@ -236,6 +254,10 @@ func (z *erasureServerPools) getServerPoolsAvailableSpace(ctx context.Context, b
 	g := errgroup.WithNErrs(len(z.serverPools))
 	for index := range z.serverPools {
 		index := index
+		// skip suspended pools for any new I/O.
+		if z.poolMeta.IsSuspended(index) {
+			continue
+		}
 		g.Go(func() error {
 			// Get the set where it would be placed.
 			storageInfos[index] = getDiskInfos(ctx, z.serverPools[index].getHashedSet(object).getDisks())
@@ -794,7 +816,11 @@ func (z *erasureServerPools) PutObject(ctx context.Context, bucket string, objec
 }
 
 func (z *erasureServerPools) deletePrefix(ctx context.Context, bucket string, prefix string) error {
-	for _, zone := range z.serverPools {
+	for idx, zone := range z.serverPools {
+		if z.poolMeta.IsSuspended(idx) {
+			logger.LogIf(ctx, fmt.Errorf("pool %d is suspended, all writes are suspended", idx+1))
+			continue
+		}
 		_, err := zone.DeleteObject(ctx, bucket, prefix, ObjectOptions{DeletePrefix: true})
 		if err != nil {
 			return err
@@ -821,6 +847,11 @@ func (z *erasureServerPools) DeleteObject(ctx context.Context, bucket string, ob
 	idx, err := z.getPoolIdxExisting(ctx, bucket, object)
 	if err != nil {
 		return objInfo, err
+	}
+
+	// skip suspended pools for any new I/O.
+	if z.poolMeta.IsSuspended(idx) {
+		return objInfo, fmt.Errorf("pool %d is suspended, all writes are suspended", idx+1)
 	}
 
 	return z.serverPools[idx].DeleteObject(ctx, bucket, object, opts)
@@ -852,6 +883,11 @@ func (z *erasureServerPools) DeleteObjects(ctx context.Context, bucket string, o
 					derrs[i] = err
 				}
 				return dobjects, derrs
+			}
+			// skip suspended pools for any new I/O.
+			if z.poolMeta.IsSuspended(idx) {
+				derrs[j] = fmt.Errorf("pool %d is suspended, all writes are suspended", idx+1)
+				continue
 			}
 			poolObjIdxMap[idx] = append(poolObjIdxMap[idx], obj)
 			origIndexMap[idx] = append(origIndexMap[idx], j)
